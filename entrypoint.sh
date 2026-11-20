@@ -32,18 +32,23 @@ case "$WALLET" in *[!a-z0-9]*) die "WALLET has characters a Pearl address cannot
 [ "${#WALLET}" -ge 30 ] || die "WALLET looks too short: '$WALLET'"
 
 MID="${SALAD_MACHINE_ID:-local}"
-WORKER="$(printf '%s' "${WORKER:-s$MID}" | tr -cd 'A-Za-z0-9' | cut -c1-11)"
-[ -n "$WORKER" ] || WORKER=salad
 
 smi() { timeout 10 nvidia-smi "$@" 2>/dev/null; }
-HAVE_SMI=0
+HAVE_SMI=0; GPUTAG=gpu
 if command -v nvidia-smi >/dev/null 2>&1; then
   INFO="$(smi --query-gpu=name,driver_version,memory.total,power.limit --format=csv,noheader | head -1)"
   if [ -n "$INFO" ]; then HAVE_SMI=1; log "gpu: $INFO"; else log "gpu: nvidia-smi gives no reading, GPU check off"; fi
+  # short model tag for the worker name: "NVIDIA GeForce RTX 4090 Laptop GPU" -> 4090l, "RTX 4070 Ti SUPER" -> 4070tis
+  GPUTAG="$(printf '%s' "${INFO%%,*}" | tr 'A-Z' 'a-z' | sed -e 's/nvidia//; s/geforce//; s/rtx//; s/laptop gpu/l/; s/laptop/l/; s/super/s/' | tr -cd 'a-z0-9')"
+  [ -n "$GPUTAG" ] || GPUTAG=gpu
 else
   log "gpu: nvidia-smi not available, GPU check off"
 fi
 [ "$MIN_GPU_UTIL" -gt 0 ] || HAVE_SMI=0
+
+# worker = GPU model + start of the Salad machine id, so Kryptex shows earnings per card type
+WORKER="$(printf '%s' "${WORKER:-${GPUTAG}x$MID}" | tr -cd 'A-Za-z0-9' | cut -c1-16)"
+[ -n "$WORKER" ] || WORKER=salad
 
 PROC_OK=0
 if cat /proc/net/tcp >/dev/null 2>&1; then PROC_OK=1; else log "warn: /proc/net/tcp not readable, pool check off"; fi
@@ -57,7 +62,11 @@ for h in $POOLS; do ARGS="$ARGS --url stratum+ssl://$h:$PORT"; done
 RUN=/tmp/krig-run; mkdir -p "$RUN"; rm -f "$RUN/fifo" "$RUN/ok"
 mkfifo "$RUN/fifo"
 # miner output -> console, and a timestamp file whenever a healthy mining line appears
-awk -v re="$OK_REGEX" -v f="$RUN/ok" '{ print; fflush(); if (tolower($0) ~ re) { print $0 > f; close(f) } }' < "$RUN/fifo" &
+# (a shell loop, not awk: mawk block-buffers stdout when it is not a terminal, so lines only appeared at exit)
+( while IFS= read -r line; do
+    printf '%s\n' "$line"
+    if printf '%s' "$line" | grep -qiE "$OK_REGEX"; then printf '%s\n' "$line" > "$RUN/ok"; fi
+  done ) < "$RUN/fifo" &
 cd "$HOME" || cd /tmp
 # shellcheck disable=SC2086
 /opt/krig/krig-miner --coin pearl $ARGS --user "$WALLET/$WORKER" --no-tui --log-level "$LOG_LEVEL" > "$RUN/fifo" 2>&1 &
