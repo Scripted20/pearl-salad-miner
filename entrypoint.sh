@@ -26,9 +26,9 @@ OK_REGEX="${OK_REGEX:-accept|th/s|hashes/s|hashrate}"  # case-insensitive, marks
 # reallocates itself if it earns less than MARGIN x its Salad Lowest rent at RATE ($ per TH/s per day).
 RATE="${RATE:-0.0184}"
 MARGIN="${MARGIN:-1.15}"
-PERF_WARMUP="${PERF_WARMUP:-600}"
-PERF_WINDOW="${PERF_WINDOW:-300}"
-PERF_EVERY="${PERF_EVERY:-600}"
+PERF_WARMUP="${PERF_WARMUP:-180}"
+PERF_WINDOW="${PERF_WINDOW:-120}"
+PERF_EVERY="${PERF_EVERY:-180}"
 MIN_THS="${MIN_THS:-}"                     # optional override of the computed threshold (TH/s)
 
 # Salad Lowest $/hour by GPU tag (portal, 20.11.2026)
@@ -39,7 +39,7 @@ price_of() {
     4070ti) echo 0.08;; 3080) echo 0.06;; 3080l) echo 0.04;; 3070) echo 0.04;; 3060ti) echo 0.03;;
     3060l) echo 0.023;; 2070) echo 0.02;; 2060) echo 0.02;; 4050l) echo 0.02;; 3090) echo 0.09;; 5090) echo 0.25;; 5080) echo 0.15;;
     5070) echo 0.08;; 4070) echo 0.07;; 3080ti) echo 0.08;; 3070ti) echo 0.06;; 5070l) echo 0.05;;
-    4070l) echo 0.05;; 4060l) echo 0.035;; 3060) echo 0.04;; 5060ti) echo 0.07;; 4060ti) echo 0.08;;
+    4070l) echo 0.05;; 4060l) echo 0.035;; 5050l) echo 0.029;; 3060ti) echo 0.03;; 3060) echo 0.04;; 5060ti) echo 0.07;; 4060ti) echo 0.08;;
     *) echo "";;
   esac
 }
