@@ -22,8 +22,27 @@ GPU_IDLE_TIMEOUT="${GPU_IDLE_TIMEOUT:-900}"
 STATUS_EVERY="${STATUS_EVERY:-600}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 OK_REGEX="${OK_REGEX:-accept|th/s|hashes/s|hashrate}"  # case-insensitive, marks a healthy mining line
+# Profit check: after PERF_WARMUP the node averages its own hashrate over PERF_WINDOW and
+# reallocates itself if it earns less than MARGIN x its Salad Lowest rent at RATE ($ per TH/s per day).
+RATE="${RATE:-0.0184}"
+MARGIN="${MARGIN:-1.15}"
+PERF_WARMUP="${PERF_WARMUP:-600}"
+PERF_WINDOW="${PERF_WINDOW:-300}"
+PERF_EVERY="${PERF_EVERY:-600}"
+MIN_THS="${MIN_THS:-}"                     # optional override of the computed threshold (TH/s)
 
-for v in PORT STARTUP_GRACE NO_POOL_TIMEOUT LOG_STALE_TIMEOUT MIN_GPU_UTIL GPU_IDLE_TIMEOUT STATUS_EVERY; do
+# Salad Lowest $/hour by GPU tag (portal, 20.11.2026)
+price_of() {
+  case "$1" in
+    4090) echo 0.16;; 4090l) echo 0.075;; 4080) echo 0.11;; 4080l) echo 0.065;; 5090l) echo 0.10;;
+    5080l) echo 0.08;; 5070ti) echo 0.10;; 5070til) echo 0.06;; 5060l) echo 0.036;; 4070tis) echo 0.09;;
+    4070ti) echo 0.08;; 3080) echo 0.06;; 3080l) echo 0.04;; 3070) echo 0.04;; 3060ti) echo 0.03;;
+    3060l) echo 0.023;; 2070) echo 0.02;; 2060) echo 0.02;; 4050l) echo 0.02;; 3090) echo 0.09;;
+    *) echo "";;
+  esac
+}
+
+for v in PORT STARTUP_GRACE NO_POOL_TIMEOUT LOG_STALE_TIMEOUT MIN_GPU_UTIL GPU_IDLE_TIMEOUT STATUS_EVERY PERF_WARMUP PERF_WINDOW PERF_EVERY; do
   eval "num $v \"\$$v\""
 done
 
@@ -53,6 +72,13 @@ WORKER="$(printf '%s' "${WORKER:-${GPUTAG}x$MID}" | tr -cd 'A-Za-z0-9' | cut -c1
 PROC_OK=0
 if cat /proc/net/tcp >/dev/null 2>&1; then PROC_OK=1; else log "warn: /proc/net/tcp not readable, pool check off"; fi
 
+if [ -z "$MIN_THS" ]; then
+  P="$(price_of "$GPUTAG")"
+  if [ -n "$P" ]; then MIN_THS="$(awk -v p="$P" -v r="$RATE" -v m="$MARGIN" 'BEGIN { printf "%.0f", p * 24 * m / r }')"; fi
+fi
+case "$MIN_THS" in ''|*[!0-9.]*) MIN_THS=""; log "profit check off (no Salad price for gpu tag '$GPUTAG')";;
+  *) log "profit check: tag=$GPUTAG needs >= $MIN_THS TH/s (rate $RATE, margin $MARGIN) after ${PERF_WARMUP}s";; esac
+
 log "wallet=$WALLET worker=$WORKER machine=$MID"
 log "pools=$POOLS port=$PORT"
 
@@ -66,6 +92,11 @@ mkfifo "$RUN/fifo"
 ( while IFS= read -r line; do
     printf '%s\n' "$line"
     if printf '%s' "$line" | grep -qiE "$OK_REGEX"; then printf '%s\n' "$line" > "$RUN/ok"; fi
+    # "Total: 109.86 TH/s shares: ..." -> "<epoch> <TH/s>" in $RUN/hr
+    case "$line" in *"Total: "*"H/s"*)
+      printf '%s\n' "$line" | sed -n 's/.*Total: \([0-9.]*\) \([PTG]\)H\/s.*/\1 \2/p' | \
+        awk -v t="$(date +%s)" '{ v=$1; if ($2=="P") v*=1000; if ($2=="G") v/=1000; print t, v }' >> "$RUN/hr" ;;
+    esac
   done ) < "$RUN/fifo" &
 cd "$HOME" || cd /tmp
 # shellcheck disable=SC2086
@@ -91,7 +122,7 @@ pool_connected() {
 }
 mtime() { stat -c %Y "$1" 2>/dev/null || echo 0; }
 
-START=$(date +%s); LAST_POOL=0; EVER_POOL=0; LAST_BUSY=0; SMI_BAD=0; LAST_STATUS=$START
+START=$(date +%s); LAST_POOL=0; EVER_POOL=0; LAST_BUSY=0; SMI_BAD=0; LAST_STATUS=$START; LAST_PERF=0
 while :; do
   sleep 15
   NOW=$(date +%s); UP=$((NOW - START))
@@ -107,6 +138,24 @@ while :; do
   # mining output (only enforced once a matching line has been seen at least once)
   OKT=$(mtime "$RUN/ok")
   if [ "$OKT" -gt 0 ] && [ $((NOW - OKT)) -gt "$LOG_STALE_TIMEOUT" ]; then bad "no mining line for ${LOG_STALE_TIMEOUT}s"; fi
+
+  # profit check: average hashrate over the last PERF_WINDOW seconds vs MIN_THS
+  AVG=""
+  if [ -s "$RUN/hr" ]; then
+    AVG=$(awk -v now="$NOW" -v w="$PERF_WINDOW" '$1 >= now - w { s += $2; n++ } END { if (n >= 3) printf "%.1f", s / n }' "$RUN/hr")
+  fi
+  if [ -n "$MIN_THS" ] && [ "$UP" -ge "$PERF_WARMUP" ] && [ $((NOW - LAST_PERF)) -ge "$PERF_EVERY" ]; then
+    LAST_PERF=$NOW
+    if [ -n "$AVG" ]; then
+      if awk -v a="$AVG" -v m="$MIN_THS" 'BEGIN { exit !(a < m) }'; then
+        bad "hashrate ${AVG} TH/s below ${MIN_THS} TH/s for tag $GPUTAG (unprofitable node)"
+      else
+        log "profit check OK: ${AVG} TH/s >= ${MIN_THS} TH/s"
+      fi
+    else
+      log "profit check: not enough hashrate samples yet"
+    fi
+  fi
 
   # GPU utilisation: only valid 0-100 readings count; idle timer starts after the first valid busy reading
   UTIL=""
@@ -129,7 +178,7 @@ while :; do
     if [ "$OKT" -gt 0 ]; then OKAGO="$((NOW - OKT))s"; else OKAGO=never; fi
     EXTRA=""
     [ "$HAVE_SMI" = 1 ] && EXTRA=" gpu=[$(smi --query-gpu=utilization.gpu,power.draw,temperature.gpu,clocks.mem --format=csv,noheader | head -1)]"
-    log "STATUS uptime=${UP}s pool_ago=$AGO mining_line_ago=$OKAGO util=${UTIL:-?}${EXTRA}"
+    log "STATUS uptime=${UP}s pool_ago=$AGO mining_line_ago=$OKAGO avg_ths=${AVG:-?} min_ths=${MIN_THS:-off} util=${UTIL:-?}${EXTRA}"
     [ -s "$RUN/ok" ] && log "last mining line: $(tail -c 300 "$RUN/ok")"
   fi
 done
