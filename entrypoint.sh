@@ -14,7 +14,7 @@ num() { case "$2" in ''|*[!0-9]*) die "$1 must be a whole number (got '$2')";; e
 WALLET="$(printf '%s' "${WALLET:-}" | tr -d ' \t\r\n')"
 POOLS="${POOLS:-prl-eu.kryptex.network prl.kryptex.network prl-us.kryptex.network}"
 PORT="${PORT:-8048}"
-STARTUP_GRACE="${STARTUP_GRACE:-600}"       # s allowed to reach the pool and print a mining line
+STARTUP_GRACE="${STARTUP_GRACE:-180}"       # s allowed to reach the pool (nodes that cannot are billed for nothing)
 NO_POOL_TIMEOUT="${NO_POOL_TIMEOUT:-600}"   # s without a pool connection, later on
 LOG_STALE_TIMEOUT="${LOG_STALE_TIMEOUT:-900}" # s without a mining/share line, once one was seen
 MIN_GPU_UTIL="${MIN_GPU_UTIL:-30}"          # %, 0 disables the GPU check
@@ -37,7 +37,9 @@ price_of() {
     4090) echo 0.16;; 4090l) echo 0.075;; 4080) echo 0.11;; 4080l) echo 0.065;; 5090l) echo 0.10;;
     5080l) echo 0.08;; 5070ti) echo 0.10;; 5070til) echo 0.06;; 5060l) echo 0.036;; 4070tis) echo 0.09;;
     4070ti) echo 0.08;; 3080) echo 0.06;; 3080l) echo 0.04;; 3070) echo 0.04;; 3060ti) echo 0.03;;
-    3060l) echo 0.023;; 2070) echo 0.02;; 2060) echo 0.02;; 4050l) echo 0.02;; 3090) echo 0.09;;
+    3060l) echo 0.023;; 2070) echo 0.02;; 2060) echo 0.02;; 4050l) echo 0.02;; 3090) echo 0.09;; 5090) echo 0.25;; 5080) echo 0.15;;
+    5070) echo 0.08;; 4070) echo 0.07;; 3080ti) echo 0.08;; 3070ti) echo 0.06;; 5070l) echo 0.05;;
+    4070l) echo 0.05;; 4060l) echo 0.035;; 3060) echo 0.04;; 5060ti) echo 0.07;; 4060ti) echo 0.08;;
     *) echo "";;
   esac
 }
@@ -122,7 +124,7 @@ pool_connected() {
 }
 mtime() { stat -c %Y "$1" 2>/dev/null || echo 0; }
 
-START=$(date +%s); LAST_POOL=0; EVER_POOL=0; LAST_BUSY=0; SMI_BAD=0; LAST_STATUS=$START; LAST_PERF=0
+START=$(date +%s); LAST_POOL=0; EVER_POOL=0; LAST_BUSY=0; SMI_BAD=0; LAST_STATUS=$START; LAST_PERF=0; LOW_STREAK=0
 while :; do
   sleep 15
   NOW=$(date +%s); UP=$((NOW - START))
@@ -147,9 +149,15 @@ while :; do
   if [ -n "$MIN_THS" ] && [ "$UP" -ge "$PERF_WARMUP" ] && [ $((NOW - LAST_PERF)) -ge "$PERF_EVERY" ]; then
     LAST_PERF=$NOW
     if [ -n "$AVG" ]; then
-      if awk -v a="$AVG" -v m="$MIN_THS" 'BEGIN { exit !(a < m) }'; then
-        bad "hashrate ${AVG} TH/s below ${MIN_THS} TH/s for tag $GPUTAG (unprofitable node)"
+      # two steps: under 0.85 x threshold -> move now; between 0.85 and 1.0 -> move only after two windows in a row
+      if awk -v a="$AVG" -v m="$MIN_THS" 'BEGIN { exit !(a < 0.85 * m) }'; then
+        bad "hashrate ${AVG} TH/s far below ${MIN_THS} TH/s for tag $GPUTAG (unprofitable node)"
+      elif awk -v a="$AVG" -v m="$MIN_THS" 'BEGIN { exit !(a < m) }'; then
+        LOW_STREAK=$((LOW_STREAK + 1))
+        if [ "$LOW_STREAK" -ge 2 ]; then bad "hashrate ${AVG} TH/s below ${MIN_THS} TH/s twice for tag $GPUTAG"; fi
+        log "profit check: ${AVG} TH/s slightly below ${MIN_THS} TH/s (warning $LOW_STREAK/2)"
       else
+        LOW_STREAK=0
         log "profit check OK: ${AVG} TH/s >= ${MIN_THS} TH/s"
       fi
     else
